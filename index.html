@@ -6394,7 +6394,7 @@ else __bootTail();
          বাজে; ওই ফোনে WebAudio এমনিতেই সম্পূর্ণ নীরব, তাই এটা শুধু লাভ। */
       const Elm = {
         enabled: false,
-        _pool: [], _live: new Set(), MAXLIVE: 12,
+        _pool: [], _live: new Set(), MAXLIVE: 16,
         _vol(rec) {
           if (Snd.muted) return 0;
           let v = rec.baseVol;
@@ -6417,7 +6417,14 @@ else __bootTail();
           try { el.volume = this._vol(rec); } catch (e) {}
           el.src = src;
           this._live.add(rec);
-          try { const p = el.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+          // play() reject হলে (যেমন elementটা তখনো জেসচারে blessed হয়নি —
+          // কড়া Samsung/Chrome-এ ঘটে) রেকর্ডটা যেন _live-এ চিরকাল আটকে
+          // না থাকে: আটকে থাকলে পুলের স্লট ভরে যায় আর Orig-এর সংলাপ-
+          // চেইন onend-এর অপেক্ষায় চিরতরে থেমে থাকে — গোটা গেমই তখন
+          // স্থায়ীভাবে নীরব হয়ে যায়। reject মানেই এই লাইনটা বাজবে না,
+          // তাই ছোট দেরিতে শেষ ধরে নিয়ে চেইন/স্লট এগিয়ে দেওয়া হয়।
+          const onPlayFail = () => { if (!rec.loop) setTimeout(() => { try { this._finish(rec); } catch (e) {} }, 400); };
+          try { const p = el.play(); if (p && p.catch) p.catch(onPlayFail); } catch (e) { onPlayFail(); }
           return rec;
         },
         _finish(rec) {
@@ -6430,7 +6437,7 @@ else __bootTail();
         _recycle(rec) {
           const el = rec.el;
           try { el.onended = null; el.onerror = null; el.pause(); el.removeAttribute("src"); el.load(); } catch (e) {}
-          if (this._pool.length < 8) this._pool.push(el);
+          if (this._pool.length < 10) this._pool.push(el);
         },
         stop(rec) {
           if (!rec || rec.dead) return;
@@ -6443,6 +6450,21 @@ else __bootTail();
       };
       // আগের সেশনে এই ফোনে মিডিয়া পথ বেছে নেওয়া থাকলে সেটাই চালু থাকবে
       try { if (localStorage.getItem("teslaDhonshoAudioPath") === "media") Elm.enabled = true; } catch (e) {}
+      /* ================= Android-এ শুরু থেকেই মিডিয়া পথ (Samsung/Chrome ফিক্স) =================
+         আগের ফিক্সের ফাঁক: AudioAuto শুধু তখনই মিডিয়া পথে বদলাত যখন
+         AudioContext 'running' হতে পারত না। কিন্তু Samsung ফোনে Chrome-এ
+         ঠিক উল্টোটা ঘটে — context দিব্যি 'running' দেখায়, সব ক্লিপ ডিকোডও
+         হয়, তবু যন্ত্রের স্তরে WebAudio-র আউটপুট স্পিকারে পৌঁছায়ই না
+         (একই ফোনে YouTube/মিডিয়া-element ঠিকই বাজে)। 'running কিন্তু
+         নীরব' অবস্থাটা কোনো কোড দিয়েই ধরা যায় না — AnalyserNode-ও
+         destination-এর আগের সিগন্যাল দেখে, স্পিকারে পৌঁছাল কিনা জানে না —
+         তাই শনাক্তের অপেক্ষা না করে Android-এ (Samsungসহ সব Android
+         Chrome-এ) রেকর্ডেড শব্দ শুরু থেকেই মিডিয়া-element পথে বাজে।
+         সিন্থ শব্দ (ইঞ্জিন হাম/বিপ/ধাক্কার layer) WebAudio-তেই চেষ্টা চলে
+         (নিচে tone/noise/engine-এর hybrid নিয়ম) — সুস্থ Android ফোনে
+         দুটোই শোনা যায়, নীরব-WebAudio ফোনে অন্তত সব রেকর্ডেড শব্দ,
+         সংলাপ, হর্ন, সাইরেন ঠিকঠাক শোনা যায়। */
+      try { if (/Android/i.test(navigator.userAgent || "")) Elm.enabled = true; } catch (e) {}
 
       /* ================= অডিও-কিক (নীরব ফাইল) =================
          দুটো আলাদা ফোন-কুইর্কের ওষুধ; দুটোই প্রথম আসল জেসচারের ভেতরে
@@ -6479,7 +6501,7 @@ else __bootTail();
           } catch (e) {}
           // (২) Elm পুল আগাম তৈরি + আনলক: নীরব ফাইল বাজিয়ে পুলে রেখে দাও
           try {
-            while (Elm._pool.length < 8) {
+            while (Elm._pool.length < 10) {
               const el = new Audio();
               el.preload = "auto"; el.src = this.SRC;
               const p = el.play(); if (p && p.catch) p.catch(() => {});
@@ -6609,7 +6631,7 @@ else __bootTail();
         },
         // ছোট helper: একটা tone (frequency glide + envelope সহ)
         tone(o) {
-          if (!this.ctx || Elm.enabled) return; // মিডিয়া পথে সিন্থ টোন বাজে না — ওটা ফাইল-ভিত্তিক পথ, শুধু রেকর্ডিং বাজায়
+          if (!this.ctx) return; // hybrid: মিডিয়া পথে থাকলেও সিন্থ টোন WebAudio-তে চেষ্টা চলে — রেকর্ডেড শব্দ element-এ, সিন্থ (বিপ/UI) WebAudio-তে; যে ফোনে WebAudio নীরব সেখানে টোনটা শুধু শোনা যাবে না, রেকর্ডেড শব্দ ঠিকই বাজবে
           const c = this.ctx, t = this.now() + (o.when || 0);
           const osc = c.createOscillator(), g = c.createGain();
           osc.type = o.type || "sine";
@@ -6624,7 +6646,7 @@ else __bootTail();
         },
         // ছোট helper: filtered noise burst (ধাক্কা, কাঁচক্যাঁচ, whoosh ইত্যাদি)
         noise(o) {
-          if (!this.ctx || Elm.enabled) return; // মিডিয়া পথে সিন্থ নয়েজও নয় (ওপরের tone-এর মতোই)
+          if (!this.ctx) return; // hybrid: tone-এর মতোই — মিডিয়া পথে থাকলেও সিন্থ নয়েজ WebAudio-তে চেষ্টা চলে
           const c = this.ctx, t = this.now() + (o.when || 0);
           const src = c.createBufferSource(); src.buffer = this.noiseBuf; src.loop = true;
           src.playbackRate.value = o.rate || 1;
@@ -6658,7 +6680,7 @@ else __bootTail();
           this.roadNoise = { gain: ng, filter: nf };
         },
         updateEngine(speedRatio, running) {
-          if (!this.ctx || !this.engineNodes || Elm.enabled) return; // মিডিয়া পথে ইঞ্জিন হাম ঘুমন্ত (রেকর্ডেড কোনো ইঞ্জিন-ফাইল নেই)
+          if (!this.ctx || !this.engineNodes) return; // hybrid: মিডিয়া পথে থাকলেও ইঞ্জিন হাম WebAudio-তে চেষ্টা চলে (রেকর্ডেড কোনো ইঞ্জিন-ফাইল নেই — হামটা সিন্থই); নীরব-WebAudio ফোনে হাম শোনা যাবে না, বাকি সব রেকর্ডেড শব্দ element-এ বাজবে
           const t = this.now(), e = this.engineNodes;
           const target = running ? 0.05 + speedRatio * 0.13 : 0;
           e.g.gain.setTargetAtTime(target, t, 0.09);
@@ -6731,7 +6753,7 @@ else __bootTail();
           this.windNodes = { gain: g, filter: f };
         },
         updateWind(alt, speedRatio) {
-          if (!this.ctx || !this.windNodes || Elm.enabled) return; // মিডিয়া পথে বাতাসের সিন্থও ঘুমন্ত
+          if (!this.ctx || !this.windNodes) return; // hybrid: tone-এর মতোই — মিডিয়া পথে থাকলেও বাতাসের সিন্থ WebAudio-তে চেষ্টা চলে
           const t = this.now();
           this.windNodes.gain.gain.setTargetAtTime(alt * (0.045 + speedRatio * 0.13), t, 0.1);
           this.windNodes.filter.frequency.setTargetAtTime(480 + alt * 520 + speedRatio * 640, t, 0.12);
