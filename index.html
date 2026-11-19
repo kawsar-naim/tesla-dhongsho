@@ -6444,6 +6444,57 @@ else __bootTail();
       // আগের সেশনে এই ফোনে মিডিয়া পথ বেছে নেওয়া থাকলে সেটাই চালু থাকবে
       try { if (localStorage.getItem("teslaDhonshoAudioPath") === "media") Elm.enabled = true; } catch (e) {}
 
+      /* ================= অডিও-কিক (নীরব ফাইল) =================
+         দুটো আলাদা ফোন-কুইর্কের ওষুধ; দুটোই প্রথম আসল জেসচারের ভেতরে
+         একবারই ঘটে (নিচের capture হুক থেকে ডাক) — সুস্থ ফোনে কিছুই
+         শোনা যায় না (ফাইলটাই নীরব), শব্দের বিষয়বস্তু/আচরণে বদল নেই:
+         (১) iPhone-এর সাইলেন্ট সুইচ: সুইচ সাইলেন্টে থাকলে iOS WebAudio-র
+         আউটপুট OS-স্তরেই মিউট রাখে, অথচ context 'running'-ই দেখায় —
+         তাই AudioAuto-র তিন নিয়মের একটাও জ্বলে না, গেম বাকি সব ঠিক
+         থাকলেও পুরোপুরি নীরব থাকে ("সব ঠিক, শুধু শব্দ নেই" — ঠিক এই
+         চেহারা)। কিন্তু মিডিয়া-element দিয়ে বাজানো শব্দ ওই সুইচে মিউট
+         হয় না, আর একবার কোনো element বাজলেই পেজের অডিও-সেশন
+         playback-ক্যাটাগরিতে উঠে গিয়ে WebAudio-ও শোনা যায়। তাই প্রথম
+         ছোঁয়ায় একটা নীরব MP3 element দিয়ে একবার বাজিয়ে দেওয়া হয়।
+         (২) Elm পুলের আগাম আনলক: WebKit (iPhone/iPad) জেসচারের বাইরে
+         প্রথম play() হওয়া element-এর শব্দ চুপচাপ reject করে দেয়।
+         Elm-এর element এতদিন গেম-ইভেন্টের মুহূর্তে (জেসচারের বাইরে)
+         তৈরি হতো, তাই যেসব ফোনে AudioAuto মিডিয়া পথে বদলাত, সেখানেও
+         element আদৌ বাজতে পারত না — পথ বদলেও নীরবই থাকত। এখন পুলের
+         element-গুলো প্রথম জেসচারেই নীরব ফাইলটা একবার করে বাজিয়ে
+         আনলক হয়ে পুলে থাকে; পরে যেকোনো মুহূর্তে Elm.play সেগুলো
+         দিয়েই নির্ভরযোগ্যভাবে বাজাতে পারে। */
+      const AudioKick = {
+        done: false,
+        SRC: "data:application/octet-stream;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjYyLjEyLjEwMgAAAAAAAAAAAAAA//NAxAAAAANIAAAAAExBTUUzLjEwMFVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80LEWwAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80DEpAAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVUxBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQsSjAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVVUxBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQMSkAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NCxKMAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NAxKQAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80LEowAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80DEpAAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVUxBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQsSjAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVVUxBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQMSkAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NCxKMAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NAxKQAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80LEowAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80DEpAAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVUxBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQsSjAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVVUxBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQMSkAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NCxKMAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NAxKQAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80LEowAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80DEpAAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQsSjAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQ==",
+        kick() {
+          if (this.done) return;
+          this.done = true;
+          // (১) সেশন-কিক: একটা throwaway element-এ নীরব ফাইলটা বাজাও
+          try {
+            const k = new Audio();
+            k.preload = "auto"; k.src = this.SRC;
+            const kp = k.play(); if (kp && kp.catch) kp.catch(() => {});
+            setTimeout(() => { try { k.pause(); k.removeAttribute("src"); k.load(); } catch (e) {} }, 600);
+          } catch (e) {}
+          // (২) Elm পুল আগাম তৈরি + আনলক: নীরব ফাইল বাজিয়ে পুলে রেখে দাও
+          try {
+            while (Elm._pool.length < 8) {
+              const el = new Audio();
+              el.preload = "auto"; el.src = this.SRC;
+              const p = el.play(); if (p && p.catch) p.catch(() => {});
+              Elm._pool.push(el);
+            }
+            setTimeout(() => {
+              // পুলে তখনো বসে থাকা element-গুলোই শুধু থামে/পরিষ্কার হয় —
+              // যেটা এর মধ্যে আসল শব্দ বাজাতে বেরিয়ে গেছে সেটা _live-এ
+              // থাকে, এই লুপ সেটা ছোঁয় না।
+              for (const el of Elm._pool) { try { el.pause(); el.removeAttribute("src"); el.load(); } catch (e) {} }
+            }, 450);
+          } catch (e) {}
+        }
+      };
+
       /* ================= সাউন্ড ইঞ্জিন =================
          - master gain: সব শব্দের মূল ভলিউম
          - engineBus: ইঞ্জিন + রাস্তার শব্দ; বড় ইভেন্টে DUCK হয়
@@ -6711,10 +6762,24 @@ else __bootTail();
          করে; context বদলালে _recreate পুরো গ্রাফটাই নতুনটায় আবার বাঁধে।
          touchstart-এ জেসচার-গণনা শুধু PointerEvent-হীন পুরনো WebView-তে
          (আধুনিক ব্রাউজারে একই ছোঁয়ায় pointerdown-ই গোনে, দ্বিগুণ নয়)। */
-      document.addEventListener("pointerdown", () => { Snd._gestureSeq++; try { Snd.init(); } catch (e) {} }, true);
+      document.addEventListener("pointerdown", () => { Snd._gestureSeq++; try { Snd.init(); } catch (e) {} try { AudioKick.kick(); } catch (e) {} }, true);
       document.addEventListener("touchstart", () => { if (!window.PointerEvent) Snd._gestureSeq++; try { Snd.init(); } catch (e) {} }, { capture: true, passive: true });
-      document.addEventListener("keydown", (e) => { if (!e.repeat) Snd._gestureSeq++; try { Snd.init(); } catch (e) {} }, true);
+      document.addEventListener("keydown", (e) => { if (!e.repeat) Snd._gestureSeq++; try { Snd.init(); } catch (e) {} try { AudioKick.kick(); } catch (e) {} }, true);
       document.addEventListener("click", () => { try { Snd.init(); } catch (e) {} }, true);
+
+      /* ---- পেজে ফিরে এলে শব্দ জাগানো ----
+         অ্যাপ বদল/স্ক্রিন লক/কলের পর context 'interrupted' বা
+         'suspended'-এ আটকে থাকতে পারে; পেজে ফিরলেই (ট্যাব আবার visible,
+         pageshow, focus) বিদ্যমান wake-পথটাই (Snd.init-এর resume →
+         recreate → মিডিয়া-পথ রায়) আবার চালানো হয়। এখানে নতুন context
+         তৈরি হয় না — জেসচারের বাইরে তৈরি context এমনিতেই suspended
+         থাকে — শুধু আটকে থাকা পুরনোটাই জাগে। খেলার মাঝে ধরে-রাখা
+         স্টিয়ারিং বাটনে নতুন pointerdown আসে না বলে, মাঝ-খেলায়
+         ফিরে এসে শব্দ ফেরানোর এটাই ভরসা। */
+      function __audioWake() { try { if (Snd.ctx) Snd.init(); } catch (e) {} }
+      document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") __audioWake(); });
+      window.addEventListener("pageshow", __audioWake);
+      window.addEventListener("focus", __audioWake);
 
       /* চলমান গলা (Clip + Orig + TTS) যেকোনো একটা থাকলেই speech-duck চালু;
          সব গলা থামলে তবেই ছাড়ে। প্রতিটা প্লেয়ারের onended/stop এখানেই আসে। */
