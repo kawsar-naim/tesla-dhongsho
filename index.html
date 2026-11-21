@@ -5999,6 +5999,7 @@ function beginRun() {
   // একটা বড় কারণ এটাই)।
   try { Snd.init(); } catch (e) {}
   try { Dlg.init(); } catch (e) {}
+  try { Dlg.unlock(); } catch (e) {} // এই কলটা start-বাটনের জেসচারের ভেতরেই ঘটে — TTS ইঞ্জিনের আনলকের এটাই একমাত্র নির্ভরযোগ্য মুহূর্ত
   try { Clip.init(); } catch (e) {} // কাউন্টডাউনের ~২ সেকেন্ডে ক্লিপ ডিকোড এগিয়ে থাকে — GO-র মুহূর্তে "start" লাইন যেন তৈরি থাকে
   try { Orig.init(); } catch (e) {}
   try { Sfx.init(); } catch (e) {}
@@ -6395,6 +6396,22 @@ else __bootTail();
       const Elm = {
         enabled: false,
         _pool: [], _live: new Set(), MAXLIVE: 16,
+        _blocked: [], _hostEl: null, // _blocked: বাজতে-না-পারা গলার লাইন — পরের আসল ছোঁয়ায় টাটকা element-এ আবার বাজে (নিচে _block/_flushBlocked)
+        // পুলের element-গুলো document-এর ভেতরেই থাকে (লুকানো host-এ):
+        // কিছু Android WebView/OEM ব্রাউজারে DOM-এর বাইরের (detached)
+        // media element-এর বাজানো OS-স্তরেই আটকে যায় বা ঝুলে থাকে —
+        // element DOM-এ থাকলে সেই ফাঁদটা থাকে না।
+        _host() {
+          if (!this._hostEl) {
+            const h = document.createElement("div");
+            h.setAttribute("aria-hidden", "true");
+            h.style.cssText = "position:absolute;width:0;height:0;overflow:hidden;visibility:hidden";
+            (document.body || document.documentElement).appendChild(h);
+            this._hostEl = h;
+          }
+          return this._hostEl;
+        },
+        _newEl() { const el = new Audio(); el.preload = "auto"; try { this._host().appendChild(el); } catch (e) {} return el; },
         _vol(rec) {
           if (Snd.muted) return 0;
           let v = rec.baseVol;
@@ -6408,46 +6425,122 @@ else __bootTail();
           let el = this._pool.pop();
           if (!el) {
             if (this._live.size >= this.MAXLIVE) return null;
-            el = new Audio(); el.preload = "auto";
+            el = this._newEl();
           }
-          const rec = { el: el, baseVol: opt.vol == null ? 0.85 : opt.vol, kind: opt.kind || "sfx", loop: !!opt.loop, onend: opt.onend || null, dead: false };
+          const rec = { el: null, src: src, baseVol: opt.vol == null ? 0.85 : opt.vol, kind: opt.kind || "sfx", loop: !!opt.loop, onend: opt.onend || null, dead: false, _retried: false, _wd: 0, _cap: 0 };
+          this._live.add(rec);
+          this._wire(rec, el);
+          this._attempt(rec, false);
+          return rec;
+        },
+        _wire(rec, el) {
+          rec.el = el;
           el.loop = rec.loop;
           el.onended = () => { if (!rec.loop) this._finish(rec); };
           el.onerror = () => { this._finish(rec); };
           try { el.volume = this._vol(rec); } catch (e) {}
-          el.src = src;
-          this._live.add(rec);
+          el.src = rec.src;
+          // recycle-এর removeAttribute+load() element-কে no-source অবস্থায়
+          // রেখে যায়; কিছু ব্রাউজারে শুধু src বসালেই ওই অবস্থা থেকে লোড
+          // শুরু হয় না — স্পষ্ট load() ডাকলে সব জায়গায়ই শুরু হয়।
+          try { el.load(); } catch (e) {}
+        },
+        _attempt(rec, isRetry) {
+          const el = rec.el;
           // play() reject হলে (যেমন elementটা তখনো জেসচারে blessed হয়নি —
           // কড়া Samsung/Chrome-এ ঘটে) রেকর্ডটা যেন _live-এ চিরকাল আটকে
           // না থাকে: আটকে থাকলে পুলের স্লট ভরে যায় আর Orig-এর সংলাপ-
           // চেইন onend-এর অপেক্ষায় চিরতরে থেমে থাকে — গোটা গেমই তখন
-          // স্থায়ীভাবে নীরব হয়ে যায়। reject মানেই এই লাইনটা বাজবে না,
-          // তাই ছোট দেরিতে শেষ ধরে নিয়ে চেইন/স্লট এগিয়ে দেওয়া হয়।
-          const onPlayFail = () => { if (!rec.loop) setTimeout(() => { try { this._finish(rec); } catch (e) {} }, 400); };
+          // স্থায়ীভাবে নীরব হয়ে যায়।
+          // গলার লাইন (kind "voice") হলে reject মানেই লাইনটা ফেলে দেওয়া
+          // নয়: লাইনটা _blocked-এ যায়, পরের আসল ছোঁয়ায় (খেলোয়াড়
+          // স্টিয়ারিং/গ্যাস চাপেই — খেলার মধ্যে ছোঁয়া লেগেই থাকে) ওই
+          // জেসচারের ভেতরে তৈরি টাটকা element-এ আবার বাজে (_flushBlocked)।
+          // SFX-এর বেলায় আগের নিয়মই: ছোট দেরিতে শেষ ধরে চেইন/স্লট এগোয়।
+          const onPlayFail = () => {
+            if (rec.dead || rec.loop) { if (!rec.loop) setTimeout(() => { try { this._finish(rec); } catch (e) {} }, 400); return; }
+            if (rec.kind === "voice" && !isRetry) { this._block(rec); return; }
+            setTimeout(() => { try { this._finish(rec); } catch (e) {} }, 400);
+          };
           try { const p = el.play(); if (p && p.catch) p.catch(onPlayFail); } catch (e) { onPlayFail(); }
-          return rec;
+          // প্রহরী: play() reject না করলেও কিছু ফোনে element লোড-অবস্থাতেই
+          // ঝুলে থাকে (currentTime এগোয় না, শব্দও আসে না) — গলার লাইনে
+          // সেটাও ধরা হয়: নির্দিষ্ট সময়ে শুরু না হলে একই _blocked-পথ।
+          // ফাইল তখনো সত্যিই লোড হচ্ছে (networkState 2, error নেই) হলে
+          // একবার বাড়তি সময় দেওয়া হয়, যাতে ধীর নেটে মিথ্যা রায় না হয়।
+          if (rec.kind === "voice" && !rec.loop) this._armWatchdog(rec, isRetry, 0);
+        },
+        _armWatchdog(rec, isRetry, stage) {
+          clearTimeout(rec._wd);
+          rec._wd = setTimeout(() => {
+            if (rec.dead || !rec.el) return;
+            const el = rec.el;
+            if (el.currentTime > 0.03 || el.readyState >= 3 || el.ended) return; // বাজছে/বাজা শেষ — সুস্থ
+            if (stage < 2 && el.networkState === 2 && !el.error) { this._armWatchdog(rec, isRetry, stage + 1); return; } // এখনো সত্যিই লোড হচ্ছে — ধীর নেট/ব্যস্ত ফোনে মোট ~৬ সেকেন্ড পর্যন্ত সুযোগ, তারপরই আটকানো ধরা হবে
+            if (!isRetry) this._block(rec); else this._finish(rec);
+          }, stage === 0 ? 1500 : 2200);
+        },
+        // আটকে-যাওয়া গলার লাইন: সন্দেহজনক element-টা থামিয়ে ফেলে দাও
+        // (পুলে ফেরে না — ওটা দিয়েই আটকেছিল), লাইনটা _blocked-এ রাখো।
+        // onend এখন ডাকা হয় না — চেইন/duck হিসাব লাইনটার আসল শেষেই মিলবে
+        // (retry বাজা শেষ হলে, অথবা ৬ সেকেন্ডে কোনো ছোঁয়াই না এলে)।
+        _block(rec) {
+          if (rec.dead) return;
+          clearTimeout(rec._wd);
+          const old = rec.el; rec.el = null;
+          if (old) {
+            try { old.onended = null; old.onerror = null; old.pause(); old.removeAttribute("src"); old.load(); } catch (e) {}
+            if (old.parentNode) { try { old.parentNode.removeChild(old); } catch (e) {} }
+          }
+          if (!this._blocked.includes(rec)) this._blocked.push(rec);
+          clearTimeout(rec._cap);
+          rec._cap = setTimeout(() => { try { this._finish(rec); } catch (e) {} }, 6000);
+        },
+        // পরের আসল ছোঁয়ার ভেতরে (নিচের capture হুক) আটকে-থাকা প্রতিটা
+        // গলার লাইন টাটকা element-এ আবার বাজে — জেসচারের ভেতরে তৈরি +
+        // বাজানো element-কে কোনো autoplay-নীতিই আটকাতে পারে না।
+        _flushBlocked() {
+          if (!this._blocked.length) return;
+          const list = this._blocked.splice(0, this._blocked.length);
+          for (const rec of list) {
+            if (rec.dead) continue;
+            clearTimeout(rec._cap);
+            rec._retried = true;
+            this._wire(rec, this._newEl());
+            this._attempt(rec, true);
+          }
         },
         _finish(rec) {
           if (rec.dead) return;
           rec.dead = true; this._live.delete(rec);
+          clearTimeout(rec._wd); clearTimeout(rec._cap);
+          const bi = this._blocked.indexOf(rec); if (bi >= 0) this._blocked.splice(bi, 1);
           const cb = rec.onend; rec.onend = null;
           this._recycle(rec);
           if (cb) { try { cb(); } catch (e) {} }
         },
         _recycle(rec) {
-          const el = rec.el;
+          const el = rec.el; rec.el = null;
+          if (!el) return;
           try { el.onended = null; el.onerror = null; el.pause(); el.removeAttribute("src"); el.load(); } catch (e) {}
           if (this._pool.length < 10) this._pool.push(el);
         },
         stop(rec) {
           if (!rec || rec.dead) return;
           rec.dead = true; this._live.delete(rec); rec.onend = null;
+          clearTimeout(rec._wd); clearTimeout(rec._cap);
+          const bi = this._blocked.indexOf(rec); if (bi >= 0) this._blocked.splice(bi, 1);
           this._recycle(rec);
         },
         stopAll() { for (const r of [...this._live]) this.stop(r); },
-        setBase(rec, v) { if (!rec || rec.dead) return; rec.baseVol = v; try { rec.el.volume = this._vol(rec); } catch (e) {} },
-        refreshVolumes() { for (const r of this._live) { try { r.el.volume = this._vol(r); } catch (e) {} } }
+        setBase(rec, v) { if (!rec || rec.dead) return; rec.baseVol = v; try { if (rec.el) rec.el.volume = this._vol(rec); } catch (e) {} },
+        refreshVolumes() { for (const r of this._live) { try { if (r.el) r.el.volume = this._vol(r); } catch (e) {} } }
       };
+      // আটকে-থাকা গলার লাইনের retry: প্রতিটা আসল ছোঁয়া/কী-চাপের একদম
+      // গোড়ায় (capture) — জেসচারের transient activation টাটকা থাকতেই
+      // টাটকা element তৈরি হয়ে লাইনটা বাজে।
+      document.addEventListener("pointerdown", () => { try { Elm._flushBlocked(); } catch (e) {} }, true);
+      document.addEventListener("keydown", () => { try { Elm._flushBlocked(); } catch (e) {} }, true);
       // আগের সেশনে এই ফোনে মিডিয়া পথ বেছে নেওয়া থাকলে সেটাই চালু থাকবে
       try { if (localStorage.getItem("teslaDhonshoAudioPath") === "media") Elm.enabled = true; } catch (e) {}
       /* ================= Android-এ শুরু থেকেই মিডিয়া পথ (Samsung/Chrome ফিক্স) =================
@@ -6502,8 +6595,8 @@ else __bootTail();
           // (২) Elm পুল আগাম তৈরি + আনলক: নীরব ফাইল বাজিয়ে পুলে রেখে দাও
           try {
             while (Elm._pool.length < 10) {
-              const el = new Audio();
-              el.preload = "auto"; el.src = this.SRC;
+              const el = Elm._newEl(); // DOM-এর ভেতরের element (Elm._host) — detached element কিছু WebView-তে বাজেই না
+              el.src = this.SRC;
               const p = el.play(); if (p && p.catch) p.catch(() => {});
               Elm._pool.push(el);
             }
@@ -7972,6 +8065,18 @@ else __bootTail();
 
       const Dlg = {
         enabled: true, speaking: false, currentKey: null, queue: [], cd: {}, rot: {}, bnVoice: null, ttsOk: ("speechSynthesis" in window),
+        _unlocked: false,
+        // TTS-আনলক: Chrome/Android-এ speechSynthesis জেসচারের ছোঁয়া না
+        // পেলে পরে ইভেন্ট-মুহূর্তে ডাকা speak() নীরবে আটকে রাখে (লাইন
+        // শুধু লেখা হয়ে আসে, গলা আসে না) — তাই "খেলা শুরু" চাপের
+        // (আসল জেসচার) ভেতর থেকেই একটা নীরব (volume 0) utterance দিয়ে
+        // ইঞ্জিনটা একবার জাগিয়ে রাখা হয়; এরপরের সব লাইন মুক্তভাবে বাজে।
+        unlock() {
+          if (!this.ttsOk || this._unlocked) return;
+          this._unlocked = true;
+          try { if (window.speechSynthesis.paused) window.speechSynthesis.resume(); } catch (e) {}
+          try { const u = new SpeechSynthesisUtterance("আ"); u.volume = 0; window.speechSynthesis.speak(u); } catch (e) {}
+        },
         init() {
           if (!this.ttsOk) return;
           const load = () => {
@@ -8016,6 +8121,7 @@ else __bootTail();
             u.rate = item.rate || 1.05;
             u.pitch = clamp(item.pitch || 1, 0, 2);
             u.onend = finish; u.onerror = finish;
+            try { if (window.speechSynthesis.paused) window.speechSynthesis.resume(); } catch (e) {} // Android Chrome-এ ইঞ্জিন paused-এ আটকে থাকলে লাইন যেতই না — বাজানোর আগেই জাগাও
             window.speechSynthesis.speak(u);
             setTimeout(finish, 4200); // safety: onend না এলে আটকে থাকবে না
           } catch (err) { finish(); }
